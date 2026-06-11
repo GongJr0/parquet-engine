@@ -11,7 +11,11 @@ on:
         required: true
         type: string
 
-permissions: {}
+# Minimal default for all jobs; the `build` job calls CI.yml (which requests
+# `contents: read`), so the caller must grant at least that. The `publish` job
+# overrides with its own elevated permissions below.
+permissions:
+  contents: read
 
 jobs:
   version-check:
