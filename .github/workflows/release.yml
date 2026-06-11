@@ -1,0 +1,101 @@
+name: Publish to PyPI & Draft Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.1.0 or v0.1.0b1)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Resolve tag name
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag matches package version
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.vars.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PYPROJECT="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          CARGO="$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")"
+          if [[ "${TAG_NAME}" != "v${PYPROJECT}" ]]; then
+            echo "::error::Tag ${TAG_NAME} does not match pyproject version v${PYPROJECT}"
+            exit 1
+          fi
+          if [[ "${PYPROJECT}" != "${CARGO}" ]]; then
+            echo "::error::pyproject version ${PYPROJECT} != Cargo.toml version ${CARGO}"
+            exit 1
+          fi
+          echo "Releasing ${TAG_NAME}"
+
+  # Reuse the full wheel/sdist build matrix from CI.yml (linux, musllinux,
+  # windows, macos, sdist) so the release publishes the same artifacts CI builds.
+  build:
+    needs: version-check
+    uses: ./.github/workflows/CI.yml
+
+  publish:
+    name: Publish to PyPI & Draft Release
+    needs: [version-check, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write   # create release + upload assets
+      id-token: write   # PyPI Trusted Publishing
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Collect distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp -n {} dist/ \;
+          ls -l dist
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Publish to PyPI (Trusted Publishing)
+        run: uv publish dist/*
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version-check.outputs.tag }}
+          name: ${{ needs.version-check.outputs.tag }}
+          draft: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
